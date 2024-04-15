@@ -1,0 +1,239 @@
+module dff(input clk,rst,din,output dout);
+reg out;
+
+always @(posedge clk) begin
+if(rst ==1)
+out <= 0;
+else
+out <= din;
+end
+assign dout = out;
+endmodule
+
+interface dff_if(input clk);
+logic din;
+logic rst;
+logic dout;
+endinterface
+
+//...............................................................................................................................
+class transaction;
+
+rand bit din;
+bit rst;
+bit dout;
+function transaction copy();
+copy = new();
+copy.din = this.din;
+copy.dout =this.dout;
+endfunction
+
+function void display(input string tag); 
+  $display("[%0s] : din %0b : dout %0b at time %0t",tag,din,dout,$time);
+endfunction
+
+endclass
+//...............................................................................................................................
+class generator;
+
+transaction tr;
+mailbox #(transaction) gendrv;
+mailbox #(transaction) genscb;
+int count;
+
+function new(mailbox #(transaction) gendrv,mailbox #(transaction) genscb);
+tr =new();
+this.gendrv = gendrv;
+this.genscb = genscb;
+endfunction
+
+event done;
+
+event sconxt;
+
+task run();
+repeat(count) begin
+assert(tr.randomize) else $error("[GEN] :randomization failed");
+gendrv.put(tr.copy);
+genscb.put(tr.copy);
+tr.display("GEN");
+@(sconxt);
+end
+->done;
+endtask;
+
+endclass
+//..............................................................................................................................................
+//..............................................................................................................................................
+class driver;
+
+transaction tr;
+mailbox #(transaction) drvgen;
+
+function new(mailbox #(transaction) drvgen);
+this.drvgen = drvgen;
+endfunction
+
+virtual dff_if vif;
+
+task reset();
+    vif.rst <= 1'b1;
+    repeat(5) @(posedge vif.clk);
+    vif.rst <= 1'b0; 
+    $display("[DRV] at time %0t: RESET DONE",$time); 
+endtask
+  
+task run();
+forever begin
+drvgen.get(tr);
+@(posedge vif.clk);
+vif.din <= tr.din;
+tr.display("DRV");
+@(posedge vif.clk);
+end
+endtask
+
+endclass
+
+//...............................................................................................................................
+class monitor;
+
+transaction tr;
+mailbox #(transaction) monscb;
+
+function new(mailbox #(transaction) monscb);
+this.monscb = monscb;
+endfunction
+
+virtual dff_if vif;
+
+task run();
+tr = new();
+forever begin
+  repeat(2) @(posedge vif.clk);
+  #1;
+tr.dout = vif.dout;
+monscb.put(tr);
+tr.display("MON");
+end
+endtask
+
+endclass
+//.................................................................................................................................
+class scoreboard;
+
+transaction tr;
+transaction trref;
+mailbox #(transaction) monscb;
+mailbox #(transaction) genscb;
+
+
+function new(mailbox #(transaction) monscb,mailbox #(transaction) genscb);
+tr =new();
+this.monscb = monscb;
+this.genscb = genscb;
+endfunction
+
+event sconxt;
+
+task run();
+forever begin
+  monscb.get(tr);
+  genscb.get(trref);
+  tr.display("SCB");
+  trref.display("REF");
+  
+  if(tr.dout == trref.din)
+    $display("[SCO] : DATA MATCHED");
+  else
+    $display("[SCO] : DATA MISMATCHED");
+    $display("-------------------------------------------------");
+  ->sconxt; 
+
+end
+endtask;
+
+endclass
+//........................................................................................................................................
+`include "transaction.sv"
+`include "generator.sv"
+`include "driver.sv"
+`include "monitor.sv"
+`include "scoreboard.sv"
+
+class environment;
+  generator gen; // Generator instance
+  driver drv; // Driver instance
+  monitor mon; // Monitor instance
+  scoreboard scb; // Scoreboard instance
+  event next;
+  
+  mailbox #(transaction) gendrv;
+  mailbox #(transaction) genscb;
+  mailbox #(transaction) monscb;
+  virtual dff_if vif;
+  function new(virtual dff_if vif);
+    gendrv =new();
+    genscb = new();
+    monscb = new();
+
+    gen = new(gendrv,genscb);
+    drv = new(gendrv);
+    mon = new(monscb);
+    scb = new(monscb,genscb);
+    
+    this.vif = vif;
+    drv.vif = this.vif;
+    mon.vif = this.vif;
+    gen.sconxt = next;
+    scb.sconxt = next;
+  endfunction
+  task pretest();
+    drv.reset();
+  endtask
+  task test();
+   fork
+    gen.run();
+    drv.run();
+    mon.run();
+    scb.run();
+   join_any
+  endtask
+  task posttest();
+    wait(gen.done.triggered);
+    $finish;
+  endtask
+
+  task run();
+   pretest();
+   test();
+   posttest();
+  endtask 
+
+  
+endclass
+//.................................................................................................................................
+`include "environment.sv"
+module testbench;
+reg clk;
+
+dff_if vif(clk);
+environment env; 
+dff dut(vif.clk,vif.rst,vif.din,vif.dout);
+initial begin
+clk <= 0;
+end
+
+always #10 clk <= ~clk;
+
+initial begin
+env = new(vif);
+env.gen.count= 10;
+env.run();
+end
+
+initial begin
+    $dumpfile("dump.vcd"); // Specify the VCD dump file
+    $dumpvars; // Dump all variables
+end
+endmodule
